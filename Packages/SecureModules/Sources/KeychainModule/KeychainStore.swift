@@ -122,6 +122,17 @@ public struct KeychainStore: Sendable {
         }
     }
 
+    /// Inserts the value for `key` only if no item exists yet; throws `KeychainError.duplicateItem`
+    /// otherwise. Use this instead of `set` when overwriting would destroy something (e.g. a key).
+    public func add(_ data: Data, for key: String) throws {
+        var addQuery = baseQuery(for: key)
+        addQuery[kSecValueData as String] = data
+        addQuery[kSecAttrAccessible as String] = accessibility.value
+
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        guard status == errSecSuccess else { throw KeychainError(status: status) }
+    }
+
     /// Returns the stored data, or throws `KeychainError.itemNotFound`.
     public func data(for key: String) throws -> Data {
         var query = baseQuery(for: key)

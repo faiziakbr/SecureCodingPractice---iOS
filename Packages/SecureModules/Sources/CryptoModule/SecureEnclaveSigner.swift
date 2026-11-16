@@ -12,11 +12,15 @@ public struct SecureEnclaveSigner: Sendable {
     public enum SignerError: Error, LocalizedError {
         case unavailable
         case accessControl
+        /// A key blob is stored but the Secure Enclave can't restore it. It is deliberately not
+        /// replaced automatically: a new key means a new public key your backend doesn't know.
+        case unusableStoredKey
 
         public var errorDescription: String? {
             switch self {
             case .unavailable: "The Secure Enclave is not available on this device."
             case .accessControl: "Could not create the key's access-control policy."
+            case .unusableStoredKey: "The stored signing key can't be used on this device. Delete it and register a new key with your server."
             }
         }
     }
@@ -28,12 +32,17 @@ public struct SecureEnclaveSigner: Sendable {
     public var publicKey: P256.Signing.PublicKey { privateKey.publicKey }
 
     /// Loads the key blob from the Keychain or creates a new Secure Enclave key.
+    ///
+    /// A new key is created **only** when no blob is stored. Keychain errors (e.g. locked) and
+    /// blobs the Secure Enclave rejects are thrown instead of silently replacing the key, which
+    /// would invalidate the public key already registered with your backend.
     public static func loadOrCreate(in store: KeychainStore, account: String) throws -> SecureEnclaveSigner {
         guard isAvailable else { throw SignerError.unavailable }
 
-        if let blob = try? store.data(for: account),
-           let key = try? SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob) {
-            return SecureEnclaveSigner(privateKey: key)
+        do {
+            return try load(in: store, account: account)
+        } catch KeychainError.itemNotFound {
+            // No key yet — create one below.
         }
 
         guard let accessControl = SecAccessControlCreateWithFlags(
@@ -44,8 +53,22 @@ public struct SecureEnclaveSigner: Sendable {
         ) else { throw SignerError.accessControl }
 
         let key = try SecureEnclave.P256.Signing.PrivateKey(accessControl: accessControl)
-        try store.set(key.dataRepresentation, for: account)
-        return SecureEnclaveSigner(privateKey: key)
+        do {
+            // Insert-only: never overwrite a key another caller stored in the meantime.
+            try store.add(key.dataRepresentation, for: account)
+            return SecureEnclaveSigner(privateKey: key)
+        } catch KeychainError.duplicateItem {
+            return try load(in: store, account: account)
+        }
+    }
+
+    private static func load(in store: KeychainStore, account: String) throws -> SecureEnclaveSigner {
+        let blob = try store.data(for: account)
+        do {
+            return SecureEnclaveSigner(privateKey: try SecureEnclave.P256.Signing.PrivateKey(dataRepresentation: blob))
+        } catch {
+            throw SignerError.unusableStoredKey
+        }
     }
 
     public static func delete(in store: KeychainStore, account: String) throws {
