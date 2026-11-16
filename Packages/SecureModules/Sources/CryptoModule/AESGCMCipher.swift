@@ -68,12 +68,29 @@ public struct AESGCMCipher: Sendable {
     ///
     /// Never hard-code keys or derive them from constants in the binary — they can be extracted
     /// with `strings`. Generate per-install keys and keep them in the Keychain.
+    ///
+    /// A new key is created **only** when no key is stored (`itemNotFound`). Any other failure —
+    /// keychain locked (`interactionNotAllowed`, e.g. a background launch before first unlock),
+    /// missing entitlement, corrupt item — is thrown, because replacing the key would make
+    /// everything encrypted with it permanently unreadable.
     public static func loadOrCreateKey(in store: KeychainStore, account: String) throws -> SymmetricKey {
-        if let data = try? store.data(for: account), data.count == 32 {
-            return SymmetricKey(data: data)
+        do {
+            return try loadKey(in: store, account: account)
+        } catch KeychainError.itemNotFound {
+            let key = SymmetricKey(size: .bits256)
+            do {
+                // Insert-only: never overwrite a key another caller stored in the meantime.
+                try store.add(key.withUnsafeBytes { Data($0) }, for: account)
+                return key
+            } catch KeychainError.duplicateItem {
+                return try loadKey(in: store, account: account)
+            }
         }
-        let key = SymmetricKey(size: .bits256)
-        try store.set(key.withUnsafeBytes { Data($0) }, for: account)
-        return key
+    }
+
+    private static func loadKey(in store: KeychainStore, account: String) throws -> SymmetricKey {
+        let data = try store.data(for: account)
+        guard data.count == 32 else { throw KeychainError.invalidData }
+        return SymmetricKey(data: data)
     }
 }

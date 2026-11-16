@@ -8,8 +8,14 @@ import SecurityCore
 /// injected dylib) usually has a different bundle ID, a different team, or a modified executable.
 public struct IntegrityChecker: Sendable {
     public let expectedBundleIdentifier: String
-    /// Optional known-good SHA-256 of the main executable (hex), e.g. delivered by your backend
-    /// per release. When `nil`, the hash is only reported.
+    /// Optional known-good SHA-256 of the main executable (hex). When `nil`, the hash is only reported.
+    ///
+    /// - Important: Only usable when you hash the *exact* binary you distribute (ad-hoc or
+    ///   enterprise IPAs, after export/signing — the code signature lives inside the Mach-O).
+    ///   App Store binaries are FairPlay-encrypted and re-signed by Apple, so the installed
+    ///   executable never matches the build you uploaded; the comparison is skipped there.
+    ///   Debug builds are also skipped: the executable is a stub and the code lives in
+    ///   `*.debug.dylib`. For real integrity guarantees use App Attest (`DCAppAttestService`).
     public let expectedExecutableHash: String?
     private let bundle: @Sendable () -> Bundle
 
@@ -39,8 +45,18 @@ public struct IntegrityChecker: Sendable {
     }
 
     /// App Store builds have no `embedded.mobileprovision`; development, ad-hoc and re-signed builds do.
+    private var hasEmbeddedProfile: Bool {
+        bundle().path(forResource: "embedded", ofType: "mobileprovision") != nil
+    }
+
+    /// No embedded profile on a device build → App Store distribution (a re-signer can also strip it,
+    /// which is why this only decides whether a hash comparison is possible, not whether to trust).
+    private var looksLikeAppStoreInstall: Bool {
+        !RuntimeEnvironment.isSimulator && !hasEmbeddedProfile
+    }
+
     func provisioningProfileCheck() -> SecurityCheck {
-        let hasProfile = bundle().path(forResource: "embedded", ofType: "mobileprovision") != nil
+        let hasProfile = hasEmbeddedProfile
         let detail: String
         let status: CheckStatus
         if RuntimeEnvironment.isSimulator {
@@ -75,11 +91,29 @@ public struct IntegrityChecker: Sendable {
             return SecurityCheck(id: "exe-hash", name: "Executable hash", detail: "Could not read the executable.", status: .warning)
         }
         let hash = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let summary = "SHA-256 \(hash.prefix(16))…"
+
+        if RuntimeEnvironment.isDebugBuild {
+            return SecurityCheck(
+                id: "exe-hash",
+                name: "Executable hash",
+                detail: "\(summary) — Debug build: the executable is a stub (code is in *.debug.dylib), so this hash says nothing about integrity.",
+                status: .info
+            )
+        }
+        if looksLikeAppStoreInstall {
+            return SecurityCheck(
+                id: "exe-hash",
+                name: "Executable hash",
+                detail: "\(summary) — App Store binaries are encrypted and re-signed by Apple, so no build-time hash can match. Use App Attest instead.",
+                status: .info
+            )
+        }
         guard let expectedExecutableHash else {
             return SecurityCheck(
                 id: "exe-hash",
                 name: "Executable hash",
-                detail: "SHA-256 \(hash.prefix(16))… — compare server-side against the hash of your release build.",
+                detail: "\(summary) — informational. Only comparable against the hash of the exact signed IPA you distributed (ad-hoc/enterprise).",
                 status: .info
             )
         }

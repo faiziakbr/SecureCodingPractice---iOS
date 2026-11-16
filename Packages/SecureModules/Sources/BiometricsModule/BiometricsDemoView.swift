@@ -29,7 +29,7 @@ public struct BiometricsDemoView: View {
                 )
             }
 
-            Section("Device") {
+            Section {
                 if let availability {
                     StatusRow(
                         availability.kind.displayName,
@@ -39,6 +39,17 @@ public struct BiometricsDemoView: View {
                 }
                 if let enrollmentStatus {
                     StatusRow(check: enrollmentStatus)
+                    if enrollmentStatus.status == .failed {
+                        Button("Accept new biometric set", systemImage: "person.badge.key") {
+                            acceptNewEnrollment()
+                        }
+                    }
+                }
+            } header: {
+                Text("Device")
+            } footer: {
+                if enrollmentStatus?.status == .failed {
+                    Text("A real app would ask for the account password here (verified by your server) before accepting the new set. A biometric match can't do it: the newly added face/finger would pass.")
                 }
             }
 
@@ -121,8 +132,12 @@ public struct BiometricsDemoView: View {
                 reason: "Verify it's you",
                 policy: allowPasscode ? .biometricsOrPasscode : .biometricsOnly
             )
-            log.log("Authenticated", "evaluatePolicy succeeded", .passed)
-            saveEnrollmentState()
+            if enrollmentStatus?.status == .failed {
+                log.log("Authenticated — but the biometric set changed", "The baseline is NOT updated by a biometric match. Accept the new set after a password check.", .warning)
+            } else {
+                log.log("Authenticated", "evaluatePolicy succeeded", .passed)
+            }
+            recordEnrollmentBaselineIfMissing()
         } catch {
             log.log(error: error, title: "Authentication failed")
         }
@@ -134,7 +149,7 @@ public struct BiometricsDemoView: View {
             secretInput = ""
             unlockedSecret = nil
             log.log("Secret stored", "Protected by .biometryCurrentSet", .passed)
-            saveEnrollmentState()
+            recordEnrollmentBaselineIfMissing()
         } catch {
             log.log(error: error, title: "Store failed")
         }
@@ -166,9 +181,27 @@ public struct BiometricsDemoView: View {
 
     // MARK: Enrollment change detection
 
+    /// Trust on first use: records the baseline only if none exists yet. It must never be
+    /// overwritten after a biometric success — whoever enrolled the new face/finger would pass.
+    private func recordEnrollmentBaselineIfMissing() {
+        guard !settings.contains(Self.enrollmentKey) else { return }
+        saveEnrollmentState()
+    }
+
+    /// Re-baselines after the user proved who they are with a non-biometric factor.
+    private func acceptNewEnrollment() {
+        // A real app verifies the account password with its server here before continuing.
+        saveEnrollmentState()
+        log.log("New biometric set accepted", "In production, only after a password check.", .info)
+    }
+
     private func saveEnrollmentState() {
         guard let state = authenticator.currentEnrollmentState() else { return }
-        try? settings.set(state, for: Self.enrollmentKey)
+        do {
+            try settings.set(state, for: Self.enrollmentKey)
+        } catch {
+            log.log(error: error, title: "Could not save enrollment baseline")
+        }
         enrollmentStatus = checkEnrollmentChange()
     }
 
